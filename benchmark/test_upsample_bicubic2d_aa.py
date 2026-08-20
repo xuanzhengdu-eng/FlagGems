@@ -24,16 +24,21 @@ vendor_name = flag_gems.vendor_name
 
 # TODO(Qiming): Kill this class
 class UpsampleBenchmark(base.GenericBenchmark):
-    def set_more_shapes(self):
-        # self.shapes is a list of tuples, each containing three elements:
-        # (N, C, H, W).
-        return []
+    def set_shapes(self, shape_file_path=None):
+        self.shapes = [
+            (1, 1, 8, 8),
+            (1, 3, 32, 48),
+            (4, 16, 64, 64),
+            (8, 32, 96, 128),
+            (4, 64, 128, 128),
+        ]
+        self.shape_desc = ["N", "C", "H", "W"]
 
 
 def _input_fn(shape, dtype, device):
     batch, channel, height, weight = shape
     input = torch.randn(size=shape, device=device, dtype=dtype)
-    scale_factors = (2, 2)
+    scale_factors = (2.0, 2.0) if height < 64 else (0.5, 0.5)
     output_size = (
         int(height * scale_factors[0]),
         int(weight * scale_factors[1]),
@@ -64,6 +69,50 @@ def test_upsample_bicubic2d_aa():
         op_name="upsample_bicubic2d_aa",
         torch_op=torch._C._nn._upsample_bicubic2d_aa,
         dtypes=dtypes,
+    )
+    bench.run()
+
+
+def _input_fn_vec(shape, dtype, device):
+    _, _, height, _ = shape
+    input = torch.randn(size=shape, device=device, dtype=dtype)
+    scale_factors = (2.0, 2.0) if height < 64 else (0.5, 0.5)
+    yield input, None, False, scale_factors
+
+
+@pytest.mark.upsample_bicubic2d_aa_vec
+@pytest.mark.skipif(
+    flag_gems.vendor_name == "tsingmicro", reason="Issue #4131: not working"
+)
+def test_upsample_bicubic2d_aa_vec():
+    bench = UpsampleBenchmark(
+        input_fn=_input_fn_vec,
+        op_name="upsample_bicubic2d_aa_vec",
+        torch_op=torch.ops.aten._upsample_bicubic2d_aa.vec,
+        dtypes=consts.FLOAT_DTYPES,
+    )
+    bench.run()
+
+
+def _input_fn_out(shape, dtype, device):
+    _, _, height, width = shape
+    input = torch.randn(size=shape, device=device, dtype=dtype)
+    scale = 2.0 if height < 64 else 0.5
+    output_size = (int(height * scale), int(width * scale))
+    out = torch.empty((*shape[:2], *output_size), device=device, dtype=dtype)
+    yield input, output_size, False, None, None, {"out": out}
+
+
+@pytest.mark.upsample_bicubic2d_aa_out
+@pytest.mark.skipif(
+    flag_gems.vendor_name == "tsingmicro", reason="Issue #4131: not working"
+)
+def test_upsample_bicubic2d_aa_out():
+    bench = UpsampleBenchmark(
+        input_fn=_input_fn_out,
+        op_name="upsample_bicubic2d_aa_out",
+        torch_op=torch.ops.aten._upsample_bicubic2d_aa.out,
+        dtypes=consts.FLOAT_DTYPES,
     )
     bench.run()
 

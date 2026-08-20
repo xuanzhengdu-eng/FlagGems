@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import logging
-from typing import Optional, Tuple
+from typing import Optional, Sequence, Tuple
 
 import torch
 import triton
@@ -198,11 +198,12 @@ def upsample_bicubic2d_aa_kernel(
     mask_x3 = span_start_w[None, :] + 3 < IW
     mask_x4 = span_start_w[None, :] + 4 < IW
 
-    for n in range(0, N, 1):
-        for c in range(0, C, 1):
-            offset_base = (
-                (n * C + c) * IH + span_start_h[:, None]
-            ) * IW + span_start_w[None, :]
+    nc = ext.program_id(axis=2)
+    n = nc // C
+    c = nc % C
+    if n < N:
+        if c < C:
+            offset_base = (nc * IH + span_start_h[:, None]) * IW + span_start_w[None, :]
 
             data00 = tl.load(
                 ptr_i + (offset_base + 0 * IW + 0),
@@ -377,7 +378,7 @@ def upsample_bicubic2d_aa_kernel(
                 + data4 * weight_y4[:, None]
             )
 
-            offset_o = ((n * C + c) * OH + oh[:, None]) * OW + ow[None, :]
+            offset_o = (nc * OH + oh[:, None]) * OW + ow[None, :]
             tl.store(ptr_o + offset_o, result)
 
 
@@ -406,8 +407,8 @@ def general_interpolate_bicubic2d_aa_kernel(
     ow = (pid_x * BLOCK_X + tl.arange(0, BLOCK_X)) % OW
     oh = (pid_y * BLOCK_Y + tl.arange(0, BLOCK_Y)) % OH
 
-    support_w = 2 * reciprocal_scale_w if (reciprocal_scale_w >= 1.0) else 2.0
-    support_h = 2 * reciprocal_scale_h if (reciprocal_scale_h >= 1.0) else 2.0
+    support_w = 2.0 * reciprocal_scale_w if (reciprocal_scale_w >= 1.0) else 2.0
+    support_h = 2.0 * reciprocal_scale_h if (reciprocal_scale_h >= 1.0) else 2.0
 
     interpolate_w = (support_w + 0.5).to(tl.int32) * 2 + 1
     interpolate_h = (support_h + 0.5).to(tl.int32) * 2 + 1
@@ -430,9 +431,12 @@ def general_interpolate_bicubic2d_aa_kernel(
     start_minus_center_h = span_start_h - center_h
 
     a = -0.5
-    for n in range(0, N, 1):
-        for c in range(0, C, 1):
-            offset_base = ((n * C + c) * IH + span_start_h[:, None]) * IW + span_start_w
+    nc = ext.program_id(axis=2)
+    n = nc // C
+    c = nc % C
+    if n < N:
+        if c < C:
+            offset_base = (nc * IH + span_start_h[:, None]) * IW + span_start_w
             weight_y_total = tl.zeros((BLOCK_Y,), dtype=tl.float32)
             result = tl.zeros((BLOCK_Y, BLOCK_X), dtype=tl.float32)
             for y in range(0, interpolate_h, 1):
@@ -472,7 +476,7 @@ def general_interpolate_bicubic2d_aa_kernel(
                 result += buffer / weight_x_total[None, :] * weight_y[:, None]
             weight_y_total = tl.where(weight_y_total != 0, weight_y_total, 1)
             result /= weight_y_total[:, None]
-            offset_o = ((n * C + c) * OH + oh[:, None]) * OW + ow[None, :]
+            offset_o = (nc * OH + oh[:, None]) * OW + ow[None, :]
             tl.store(ptr_o + offset_o, result)
 
 
@@ -490,29 +494,26 @@ def bicubic_reciprocal_scale(src_size, dst_size, align_corners, scale):
 
 
 # https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/native/native_functions.yaml#L12547
-def _upsample_bicubic2d_aa(
+def _upsample_bicubic2d_aa_contiguous(
     input: torch.Tensor,
-    output_size: Tuple[int],
+    output_size: Tuple[int, int],
     align_corners: bool = False,
     scales_h: Optional[float] = None,
     scales_w: Optional[float] = None,
+    output: Optional[torch.Tensor] = None,
 ):
-    logger.debug("GEMS UPSAMPLE BICUBIC2D AA")
-    assert input.device.type == device
-    assert input.ndim == 4, "The ndim of input must be 4"
-    assert len(output_size) == 2, "The len of output_size must be 2"
-
     OH, OW = output_size
     N, C, IH, IW = input.shape
 
     reciprocal_scale_h = bicubic_reciprocal_scale(IH, OH, align_corners, scales_h)
     reciprocal_scale_w = bicubic_reciprocal_scale(IW, OW, align_corners, scales_w)
 
-    # allocate output
-    output = torch.empty((N, C, OH, OW), device=input.device, dtype=input.dtype)
+    if output is None:
+        output = torch.empty((N, C, OH, OW), device=input.device, dtype=input.dtype)
     grid = lambda META: (
         triton.cdiv(OW, META["BLOCK_X"]),
         triton.cdiv(OH, META["BLOCK_Y"]),
+        N * C,
     )
     kernel = (
         general_interpolate_bicubic2d_aa_kernel
@@ -533,3 +534,114 @@ def _upsample_bicubic2d_aa(
             reciprocal_scale_w,
         )
     return output
+
+
+def _validate_upsample_bicubic2d_aa(
+    input: torch.Tensor, output_size: Sequence[int]
+) -> Tuple[int, int]:
+    if input.device.type != device:
+        raise RuntimeError(f"Expected input on {device}, but got {input.device.type}")
+    if input.ndim != 4:
+        raise RuntimeError(
+            "It is expected input_size equals to 4, but got size " f"{input.ndim}"
+        )
+    if len(output_size) != 2:
+        raise RuntimeError("output_size must have two elements")
+    if not input.is_floating_point():
+        raise RuntimeError(
+            '"compute_index_ranges_weights" not implemented for '
+            f"'{str(input.dtype).removeprefix('torch.').title()}'"
+        )
+
+    output_h, output_w = (int(output_size[0]), int(output_size[1]))
+    if input.shape[0] == 0 or input.shape[1] == 0:
+        raise RuntimeError("Non-empty 4D data tensor expected")
+    if min(input.shape[2], input.shape[3], output_h, output_w) <= 0:
+        raise RuntimeError("Input and output sizes should be greater than 0")
+    return output_h, output_w
+
+
+# https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/native/native_functions.yaml#L12547
+def _upsample_bicubic2d_aa(
+    input: torch.Tensor,
+    output_size: Tuple[int, int],
+    align_corners: bool = False,
+    scales_h: Optional[float] = None,
+    scales_w: Optional[float] = None,
+):
+    logger.debug("GEMS UPSAMPLE BICUBIC2D AA")
+    output_size = _validate_upsample_bicubic2d_aa(input, output_size)
+    channels_last = input.is_contiguous(memory_format=torch.channels_last)
+    contiguous_input = input.contiguous()
+    output = _upsample_bicubic2d_aa_contiguous(
+        contiguous_input, output_size, align_corners, scales_h, scales_w
+    )
+    if channels_last:
+        output = output.contiguous(memory_format=torch.channels_last)
+    return output
+
+
+def _upsample_bicubic2d_aa_out(
+    input: torch.Tensor,
+    output_size: Tuple[int, int],
+    align_corners: bool = False,
+    scales_h: Optional[float] = None,
+    scales_w: Optional[float] = None,
+    *,
+    out: torch.Tensor,
+):
+    if out.device != input.device:
+        raise RuntimeError(
+            f"Expected out tensor on {input.device}, but got {out.device}"
+        )
+    if out.dtype != input.dtype:
+        raise RuntimeError(
+            f"Expected out tensor to have dtype {input.dtype}, but got {out.dtype} instead"
+        )
+    output_size = _validate_upsample_bicubic2d_aa(input, output_size)
+    expected_shape = (*input.shape[:2], *output_size)
+    if tuple(out.shape) != expected_shape:
+        out.resize_(expected_shape)
+    if (
+        input.is_contiguous()
+        and out.is_contiguous()
+        and input.data_ptr() != out.data_ptr()
+    ):
+        return _upsample_bicubic2d_aa_contiguous(
+            input,
+            output_size,
+            align_corners,
+            scales_h,
+            scales_w,
+            output=out,
+        )
+    result = _upsample_bicubic2d_aa(
+        input, output_size, align_corners, scales_h, scales_w
+    )
+    out.copy_(result)
+    return out
+
+
+def _upsample_bicubic2d_aa_vec(
+    input: torch.Tensor,
+    output_size: Optional[Sequence[int]],
+    align_corners: bool,
+    scale_factors: Optional[Sequence[float]],
+):
+    if (output_size is None) == (scale_factors is None):
+        raise RuntimeError("Must specify exactly one of output_size and scale_factors")
+    if output_size is not None:
+        return _upsample_bicubic2d_aa(input, tuple(output_size), align_corners)
+    if len(scale_factors) != 2:
+        raise RuntimeError("scale_factors must have two elements")
+    output_size = (
+        int(input.shape[-2] * scale_factors[0]),
+        int(input.shape[-1] * scale_factors[1]),
+    )
+    return _upsample_bicubic2d_aa(
+        input,
+        output_size,
+        align_corners,
+        float(scale_factors[0]),
+        float(scale_factors[1]),
+    )

@@ -832,7 +832,11 @@ from flag_gems.ops.unique_dim import unique_dim
 from flag_gems.ops.unsafe_chunk import unsafe_chunk
 from flag_gems.ops.unsqueeze import unsqueeze, unsqueeze_
 from flag_gems.ops.upsample_bicubic2d import upsample_bicubic2d
-from flag_gems.ops.upsample_bicubic2d_aa import _upsample_bicubic2d_aa
+from flag_gems.ops.upsample_bicubic2d_aa import (
+    _upsample_bicubic2d_aa,
+    _upsample_bicubic2d_aa_out,
+    _upsample_bicubic2d_aa_vec,
+)
 from flag_gems.ops.upsample_bicubic2d_aa_backward import _upsample_bicubic2d_aa_backward
 from flag_gems.ops.upsample_bilinear2d import upsample_bilinear2d
 from flag_gems.ops.upsample_linear1d import upsample_linear1d
@@ -952,6 +956,8 @@ __all__ = [
     "_unsafe_masked_index_put_accumulate",
     "_unsafe_view",
     "_upsample_bicubic2d_aa",
+    "_upsample_bicubic2d_aa_out",
+    "_upsample_bicubic2d_aa_vec",
     "_upsample_bicubic2d_aa_backward",
     "_upsample_bilinear2d_aa",
     "_upsample_bilinear2d_aa_backward",

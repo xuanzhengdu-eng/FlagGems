@@ -11892,11 +11892,36 @@ ops:
       - _upsample_bicubic2d_aa
     labels:
       - aten
+      - KernelGen
       - Reduction
     kind:
       - NeuralNetwork
     stages:
       - stable: '2.2'
+  - id: upsample_bicubic2d_aa_out
+    description: An out variant of `_upsample_bicubic2d_aa()`.
+    for:
+      - _upsample_bicubic2d_aa.out
+    labels:
+      - aten
+      - KernelGen
+      - Reduction
+    kind:
+      - NeuralNetwork
+    stages:
+      - alpha: '5.4'
+  - id: upsample_bicubic2d_aa_vec
+    description: A vector-parameter variant of `_upsample_bicubic2d_aa()`.
+    for:
+      - _upsample_bicubic2d_aa.vec
+    labels:
+      - aten
+      - KernelGen
+      - Reduction
+    kind:
+      - NeuralNetwork
+    stages:
+      - alpha: '5.4'
   - id: upsample_bicubic2d_aa_backward
     description: A backward case for `_upsample_bicubic2d_aa()`.
     for:

@@ -29,22 +29,18 @@ random.seed(time.time() // 100)
 if QUICK_MODE:
     ALIGN_CORNERS_FWD = [False]
     SCALES = [(2, 2)]
-    SHAPES_FWD = [(32, 16, 128, 128)]
+    SHAPES_FWD = [(1, 2, 8, 9)]
     FLOAT_DTYPES = [torch.float16]
     PARAMS_BWD = [(1, 3, 16, 16, 8, 8, False)]
 else:
     ALIGN_CORNERS_FWD = [False, True]
-    SCALES = [(2, 2), (0.3, 0.7)]
-    # SCALES = [(2, 2), (2.1, 3.7), (1.3, 5.1), (0.3, 0.7)]  # original, commented out to reduce CI timeout
+    SCALES = [(2, 2), (0.5, 0.75)]
     SHAPES_FWD = [
-        (32, 16, 128, 128),
-        # (15, 37, 256, 256),  # commented out to reduce CI timeout
-        (3, 5, 127, 127),
-        (128, 192, 42, 51),
-        # (3, 7, 1023, 1025),  # commented out to reduce CI timeout - very large
+        (1, 1, 3, 5),
+        (2, 3, 17, 19),
+        (4, 8, 32, 48),
     ]
-    # original: utils.FLOAT_DTYPES (3 dtypes), reduced to 2 to avoid CI timeout
-    FLOAT_DTYPES = utils.PRIMARY_FLOAT_DTYPES
+    FLOAT_DTYPES = utils.FLOAT_DTYPES
     PARAMS_BWD = [
         (1, 3, 16, 16, 8, 8, False),
         (2, 4, 8, 8, 16, 16, False),
@@ -100,6 +96,73 @@ def test_upsample_bicubic2d_aa(dtype, shape, scale, align_corners):
 
     reduce_dim = span(scale[0]) * span(scale[1])
     utils.gems_assert_close(res_out, ref_out, dtype, reduce_dim=reduce_dim)
+
+
+@pytest.mark.upsample_bicubic2d_aa
+@pytest.mark.parametrize("layout", ["contiguous", "channels_last", "transposed"])
+def test_upsample_bicubic2d_aa_layout(layout):
+    input = torch.randn((2, 3, 7, 9), device=flag_gems.device)
+    if layout == "channels_last":
+        input = input.contiguous(memory_format=torch.channels_last)
+    elif layout == "transposed":
+        input = input.transpose(-1, -2)
+    ref_input = utils.to_reference(input)
+    ref_out = torch.ops.aten._upsample_bicubic2d_aa(
+        ref_input, (11, 13), False, None, None
+    )
+    with flag_gems.use_gems():
+        result = torch.ops.aten._upsample_bicubic2d_aa(
+            input, (11, 13), False, None, None
+        )
+    utils.gems_assert_close(result, ref_out, torch.float32, reduce_dim=25)
+    expected_format = (
+        torch.channels_last if layout == "channels_last" else torch.contiguous_format
+    )
+    assert result.is_contiguous(memory_format=expected_format)
+
+
+@pytest.mark.upsample_bicubic2d_aa_vec
+@pytest.mark.parametrize("use_scale_factors", [False, True])
+def test_upsample_bicubic2d_aa_vec(use_scale_factors):
+    input = torch.randn((1, 2, 8, 10), device=flag_gems.device)
+    ref_input = utils.to_reference(input)
+    args = (None, False, (1.5, 0.7)) if use_scale_factors else ((12, 7), False, None)
+    ref_out = torch.ops.aten._upsample_bicubic2d_aa.vec(ref_input, *args)
+    with flag_gems.use_gems():
+        result = torch.ops.aten._upsample_bicubic2d_aa.vec(input, *args)
+    utils.gems_assert_close(result, ref_out, torch.float32, reduce_dim=49)
+
+
+@pytest.mark.upsample_bicubic2d_aa_vec
+@pytest.mark.parametrize(
+    "output_size,scale_factors", [(None, None), ((12, 7), (1.5, 0.7))]
+)
+def test_upsample_bicubic2d_aa_vec_requires_one_size(output_size, scale_factors):
+    input = torch.randn((1, 2, 8, 10), device=flag_gems.device)
+    with flag_gems.use_gems(), pytest.raises(RuntimeError):
+        torch.ops.aten._upsample_bicubic2d_aa.vec(
+            input, output_size, False, scale_factors
+        )
+
+
+@pytest.mark.upsample_bicubic2d_aa_out
+@pytest.mark.parametrize("noncontiguous", [False, True])
+def test_upsample_bicubic2d_aa_out(noncontiguous):
+    input = torch.randn((1, 2, 8, 10), device=flag_gems.device)
+    ref_input = utils.to_reference(input)
+    if noncontiguous:
+        out = torch.empty((1, 2, 7, 12), device=flag_gems.device).transpose(-1, -2)
+    else:
+        out = torch.empty(0, device=flag_gems.device)
+    ref_out = torch.ops.aten._upsample_bicubic2d_aa(
+        ref_input, (12, 7), False, None, None
+    )
+    with flag_gems.use_gems():
+        result = torch.ops.aten._upsample_bicubic2d_aa.out(
+            input, (12, 7), False, None, None, out=out
+        )
+    assert result is out
+    utils.gems_assert_close(result, ref_out, torch.float32, reduce_dim=25)
 
 
 def upsample_bicubic2d_aa_backward_call(grad, input_size, align_corners):

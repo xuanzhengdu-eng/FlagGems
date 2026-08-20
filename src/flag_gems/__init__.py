@@ -236,6 +236,8 @@ _FULL_CONFIG = (
     ("_unsafe_masked_index_put_accumulate", _unsafe_masked_index_put_accumulate),
     ("_unsafe_view", _unsafe_view),
     ("_upsample_bicubic2d_aa", _upsample_bicubic2d_aa),
+    ("_upsample_bicubic2d_aa.out", _upsample_bicubic2d_aa_out),
+    ("_upsample_bicubic2d_aa.vec", _upsample_bicubic2d_aa_vec),
     ("_upsample_bicubic2d_aa_backward", _upsample_bicubic2d_aa_backward),
     ("_upsample_bilinear2d_aa", _upsample_bilinear2d_aa),
     ("_upsample_bilinear2d_aa_backward", _upsample_bilinear2d_aa_backward),
