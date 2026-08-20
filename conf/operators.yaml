@@ -12511,10 +12511,25 @@ ops:
     labels:
       - aten
       - fused
+      - KernelGen
     kind:
       - NeuralNetwork
     stages:
       - stable: '2.2'
+  - id: weight_norm_interface_out
+    description: |
+      Out variant of _weight_norm_interface. Writes the normalized weight and
+      per-dimension norms into caller-provided output tensors.
+    for:
+      - _weight_norm_interface.out
+    labels:
+      - aten
+      - fused
+      - KernelGen
+    kind:
+      - NeuralNetwork
+    stages:
+      - alpha: '5.4'
   - id: weight_norm_interface_backward
     description: |
       Computes the gradients for weight normalization during the backward pass.

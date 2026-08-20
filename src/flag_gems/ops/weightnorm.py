@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 @triton.autotune(
     configs=runtime.get_tuned_config("weight_norm_kernel_last"), key=["M", "N"]
 )
-@triton.jit(do_not_specialize=["eps"])
+@triton.jit
 def weight_norm_kernel_last(
     output,
     norm,
@@ -39,7 +39,6 @@ def weight_norm_kernel_last(
     g,
     M,
     N,
-    eps,
     BLOCK_ROW_SIZE: tl.constexpr,
     BLOCK_COL_SIZE: tl.constexpr,
 ):
@@ -52,17 +51,17 @@ def weight_norm_kernel_last(
     v_block = tl.zeros([BLOCK_COL_SIZE, BLOCK_ROW_SIZE], dtype=tl.float32)
     for base in range(0, M, BLOCK_ROW_SIZE):
         row_offset = base + ty
-        mask = row_offset < M and col_mask
+        mask = (row_offset < M) & col_mask
         v_value = tl.load(v + row_offset * N + col_offset, mask=mask).to(tl.float32)
         v_block += v_value * v_value
 
-    normalized = tl.sqrt(tl.sum(v_block, axis=1) + eps)
+    normalized = tl.sqrt(tl.sum(v_block, axis=1))
     tl.store(norm + col_offset, normalized[:, None], mask=col_mask)
     g_value = tl.load(g + col_offset, mask=col_mask).to(tl.float32)
 
     for base in range(0, M, BLOCK_ROW_SIZE):
         row_offset = base + ty
-        mask = row_offset < M and col_mask
+        mask = (row_offset < M) & col_mask
         v_value = tl.load(v + row_offset * N + col_offset, mask=mask).to(tl.float32)
         v_vec = v_value / normalized[:, None]
         out = v_vec * g_value
@@ -73,7 +72,7 @@ def weight_norm_kernel_last(
 @triton.autotune(
     configs=runtime.get_tuned_config("weight_norm_kernel_first"), key=["M", "N"]
 )
-@triton.jit(do_not_specialize=["eps"])
+@triton.jit
 def weight_norm_kernel_first(
     output,
     norm,
@@ -81,7 +80,6 @@ def weight_norm_kernel_first(
     g,
     M,
     N,
-    eps,
     BLOCK_ROW_SIZE: tl.constexpr,
     BLOCK_COL_SIZE: tl.constexpr,
 ):
@@ -94,17 +92,17 @@ def weight_norm_kernel_first(
     v_block = tl.zeros([BLOCK_ROW_SIZE, BLOCK_COL_SIZE], dtype=tl.float32)
     for base in range(0, N, BLOCK_COL_SIZE):
         col_offset = base + tx
-        mask = col_offset < N and row_mask
+        mask = (col_offset < N) & row_mask
         v_value = tl.load(v + row_offset * N + col_offset, mask=mask).to(tl.float32)
         v_block += v_value * v_value
 
-    normalized = tl.sqrt(tl.sum(v_block, axis=1) + eps)
+    normalized = tl.sqrt(tl.sum(v_block, axis=1))
     tl.store(norm + row_offset, normalized[:, None], mask=row_mask)
     g_value = tl.load(g + row_offset, mask=row_mask).to(tl.float32)
 
     for base in range(0, N, BLOCK_COL_SIZE):
         col_offset = base + tx
-        mask = col_offset < N and row_mask
+        mask = (col_offset < N) & row_mask
         v_value = tl.load(v + row_offset * N + col_offset, mask=mask).to(tl.float32)
         v_vec = v_value / normalized[:, None]
         out = v_vec * g_value
@@ -136,7 +134,7 @@ def weight_norm_bwd_kernel_last(
 
     g_value = tl.load(g + col_offset, mask=col_mask).to(tl.float32)
     norm_value = tl.load(norm + col_offset, mask=col_mask).to(tl.float32)
-    # norm_value is already sqrt(sum(v^2) + eps) from forward, guaranteed > 0
+    # norm_value is the sqrt(sum(v^2)) value saved by the forward pass.
     norm_1 = 1 / norm_value
     norm_3 = tl_extra_shim.pow(norm_1, 3)
 
@@ -188,7 +186,7 @@ def weight_norm_bwd_kernel_first(
 
     g_value = tl.load(g + row_offset, mask=row_mask).to(tl.float32)
     norm_value = tl.load(norm + row_offset, mask=row_mask).to(tl.float32)
-    # norm_value is already sqrt(sum(v^2) + eps) from forward, guaranteed > 0
+    # norm_value is the sqrt(sum(v^2)) value saved by the forward pass.
     norm_1 = 1 / norm_value
     norm_3 = tl_extra_shim.pow(norm_1, 3)
 
@@ -215,29 +213,63 @@ def weight_norm_bwd_kernel_first(
     tl.store(g_grad + row_offset, g_grad_value, mask=row_mask)
 
 
-def weight_norm_interface(v, g, dim=0):
-    logger.debug("GEMS WEIGHT NORM INTERFACE FORWARD")
-    v = v.contiguous()
+def _weight_norm_interface(v, g, dim, output, norm):
+    if dim != 0 and dim != v.ndim - 1:
+        raise RuntimeError("fused kernels can only be applied for first or last dim")
     g = g.contiguous()
-    output = torch.empty_like(v)
-    norm = torch.empty_like(g, dtype=torch.float32)
     if dim == 0:
         M = v.shape[0]
         N = math.prod(v.shape[1:])
         grid = lambda META: (triton.cdiv(M, META["BLOCK_ROW_SIZE"]),)
         with torch_device_fn.device(v.device):
-            weight_norm_kernel_first[grid](
-                output, norm, v, g, M, N, eps=torch.finfo(torch.float32).tiny
-            )
+            weight_norm_kernel_first[grid](output, norm, v, g, M, N)
     elif dim == v.ndim - 1:
         M = math.prod(v.shape[:-1])
         N = v.shape[dim]
         grid = lambda META: (triton.cdiv(N, META["BLOCK_COL_SIZE"]),)
         with torch_device_fn.device(v.device):
-            weight_norm_kernel_last[grid](
-                output, norm, v, g, M, N, eps=torch.finfo(torch.float32).tiny
-            )
+            weight_norm_kernel_last[grid](output, norm, v, g, M, N)
     return output, norm
+
+
+def weight_norm_interface(v, g, dim=0):
+    logger.debug("GEMS WEIGHT NORM INTERFACE FORWARD")
+    output = torch.empty_like(v, memory_format=torch.contiguous_format)
+    norm = torch.empty_like(
+        g, dtype=torch.float32, memory_format=torch.contiguous_format
+    )
+    return _weight_norm_interface(v, g, dim, output, norm)
+
+
+def weight_norm_interface_out(v, g, dim=0, *, out0, out1):
+    logger.debug("GEMS WEIGHT NORM INTERFACE FORWARD OUT")
+    if out0.device != v.device or out1.device != v.device:
+        raise RuntimeError("Expected out tensors to be on the same device as v")
+    if out0.dtype != v.dtype or out1.dtype != torch.float32:
+        raise RuntimeError("Unexpected dtype for _weight_norm_interface.out outputs")
+    if out0.shape != v.shape:
+        out0.resize_(v.shape)
+    if out1.shape != g.shape:
+        out1.resize_(g.shape)
+
+    output = (
+        out0
+        if out0.is_contiguous()
+        else torch.empty_like(v, memory_format=torch.contiguous_format)
+    )
+    norm = (
+        out1
+        if out1.is_contiguous()
+        else torch.empty_like(
+            g, dtype=torch.float32, memory_format=torch.contiguous_format
+        )
+    )
+    _weight_norm_interface(v, g, dim, output, norm)
+    if output is not out0:
+        out0.copy_(output)
+    if norm is not out1:
+        out1.copy_(norm)
+    return out0, out1
 
 
 def weight_norm_interface_backward(w_grad, saved_v, saved_g, saved_norms, dim):

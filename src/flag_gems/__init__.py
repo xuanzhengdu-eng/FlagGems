@@ -253,6 +253,7 @@ _FULL_CONFIG = (
     ("_upsample_nearest_exact3d", _upsample_nearest_exact3d),
     ("_weight_norm", _weight_norm),
     ("_weight_norm_interface", weight_norm_interface),
+    ("_weight_norm_interface.out", weight_norm_interface_out),
     ("_weight_norm_interface_backward", weight_norm_interface_backward),
     ("abs", abs),
     ("abs_", abs_),

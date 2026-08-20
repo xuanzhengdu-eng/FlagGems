@@ -17,26 +17,34 @@ import torch
 
 import flag_gems
 
-from . import base
-
-vendor_name = flag_gems.vendor_name
-
-# NOTE: This is a dead function identified during refactoring
-# def weight_norm_interface_input_fn(shape, dtype, device):
-#    dim = 0
-#    v = torch.randn(shape, dtype=dtype, device=device)
-#    g = torch.randn(shape[dim], dtype=dtype, device=device)
-#    yield v, g, dim
+from . import base, consts
 
 
-def weight_norm_input_fn(shape, dtype, device):
+class WeightNormInterfaceBenchmark(base.GenericBenchmark):
+    DEFAULT_SHAPES = [(64, 64), (1024, 1024), (10000, 256)]
+    DEFAULT_SHAPE_DESC = "input shape; both first and last dimensions are benchmarked"
+
+    def set_shapes(self, shape_file_path=None):
+        self.shapes = list(self.DEFAULT_SHAPES)
+        if base.Config.bench_level == consts.BenchLevel.COMPREHENSIVE:
+            self.shapes.extend(self.set_more_shapes())
+
+    def set_more_shapes(self):
+        return [(4096, 4096), (64, 512, 512)]
+
+
+def weight_norm_interface_input_fn(shape, dtype, device):
     v = torch.randn(shape, dtype=dtype, device=device)
-    if vendor_name in ["cambricon", "enflame"]:
-        # Cambricon and Enflame fix input shape limit.
-        g = torch.randn(shape[:1] + (1,) * (len(shape) - 1), dtype=dtype, device=device)
-    else:
-        g = torch.randn(shape, dtype=dtype, device=device)
-    yield v, g, 0
+    for dim in dict.fromkeys((0, len(shape) - 1)):
+        g = torch.randn(shape[dim], dtype=dtype, device=device)
+        yield v, g, dim
+
+
+def weight_norm_interface_out_input_fn(shape, dtype, device):
+    for v, g, dim in weight_norm_interface_input_fn(shape, dtype, device):
+        out0 = torch.empty(0, dtype=dtype, device=device)
+        out1 = torch.empty(0, dtype=torch.float32, device=device)
+        yield v, g, dim, {"out0": out0, "out1": out1}
 
 
 @pytest.mark.weight_norm_interface
@@ -44,12 +52,27 @@ def weight_norm_input_fn(shape, dtype, device):
     flag_gems.vendor_name == "tsingmicro", reason="Issue #4131: not working"
 )
 def test_weight_norm_interface():
-    bench = base.GenericBenchmarkExcluse1D(
+    bench = WeightNormInterfaceBenchmark(
         op_name="weight_norm_interface",
-        input_fn=weight_norm_input_fn,
-        torch_op=torch._weight_norm,
+        input_fn=weight_norm_interface_input_fn,
+        torch_op=torch.ops.aten._weight_norm_interface.default,
     )
-    bench.set_gems(flag_gems.weight_norm)
+    bench.set_gems(flag_gems.weight_norm_interface)
+
+    bench.run()
+
+
+@pytest.mark.weight_norm_interface_out
+@pytest.mark.skipif(
+    flag_gems.vendor_name == "tsingmicro", reason="Issue #4131: not working"
+)
+def test_weight_norm_interface_out():
+    bench = WeightNormInterfaceBenchmark(
+        op_name="weight_norm_interface_out",
+        input_fn=weight_norm_interface_out_input_fn,
+        torch_op=torch.ops.aten._weight_norm_interface.out,
+    )
+    bench.set_gems(flag_gems.weight_norm_interface_out)
 
     bench.run()
 

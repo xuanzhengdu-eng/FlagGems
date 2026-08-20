@@ -25,7 +25,7 @@ if cfg.QUICK_MODE:
     DIM_LIST = [-1]
 else:
     FLOAT_DTYPES = utils.FLOAT_DTYPES
-    DIM_LIST = [0, -1, -1]
+    DIM_LIST = [0, -1]
 
 
 @pytest.mark.weight_norm_interface
@@ -54,6 +54,77 @@ def test_weight_norm_interface(shape, dtype, dim):
     utils.gems_assert_close(
         res_norm_out, ref_norm_out, torch.float32, reduce_dim=reduce_size
     )
+
+
+@pytest.mark.weight_norm_interface
+def test_weight_norm_interface_zero_norm():
+    v = torch.zeros((4, 8), dtype=torch.float32, device=flag_gems.device)
+    g = torch.ones(4, dtype=torch.float32, device=flag_gems.device)
+    ref_v = utils.to_reference(v, True)
+    ref_g = utils.to_reference(g, True)
+
+    ref_w, ref_norm = torch.ops.aten._weight_norm_interface(ref_v, ref_g, 0)
+    with flag_gems.use_gems():
+        res_w, res_norm = torch.ops.aten._weight_norm_interface(v, g, 0)
+
+    utils.gems_assert_close(res_w, ref_w, torch.float32, equal_nan=True)
+    utils.gems_assert_close(res_norm, ref_norm, torch.float32)
+
+
+@pytest.mark.weight_norm_interface
+def test_weight_norm_interface_invalid_dim():
+    v = torch.randn((2, 3, 4), device=flag_gems.device)
+    g = torch.randn(3, device=flag_gems.device)
+    with flag_gems.use_gems(), pytest.raises(RuntimeError):
+        torch.ops.aten._weight_norm_interface(v, g, 1)
+
+
+@pytest.mark.weight_norm_interface_out
+@pytest.mark.parametrize("shape", [(64, 64), (32, 16, 8)])
+@pytest.mark.parametrize("dim", [0, -1])
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_weight_norm_interface_out(shape, dtype, dim):
+    dim = dim % len(shape)
+    v = torch.randn(shape, dtype=dtype, device=flag_gems.device)
+    g = torch.randn(shape[dim], dtype=dtype, device=flag_gems.device)
+    ref_v = utils.to_reference(v, True)
+    ref_g = utils.to_reference(g, True)
+    ref_out0 = torch.empty(0, dtype=ref_v.dtype, device=ref_v.device)
+    ref_out1 = torch.empty(0, dtype=ref_v.dtype, device=ref_v.device)
+    out0 = torch.empty(0, dtype=dtype, device=v.device)
+    out1 = torch.empty(0, dtype=torch.float32, device=v.device)
+
+    ref = torch.ops.aten._weight_norm_interface.out(
+        ref_v, ref_g, dim, out0=ref_out0, out1=ref_out1
+    )
+    with flag_gems.use_gems():
+        res = torch.ops.aten._weight_norm_interface.out(v, g, dim, out0=out0, out1=out1)
+
+    assert res[0] is out0 and res[1] is out1
+    utils.gems_assert_close(res[0], ref[0], dtype, equal_nan=True)
+    utils.gems_assert_close(res[1], ref[1], torch.float32)
+
+
+@pytest.mark.weight_norm_interface_out
+def test_weight_norm_interface_out_noncontiguous():
+    v = torch.randn((8, 4), device=flag_gems.device).T
+    g = torch.randn(8, device=flag_gems.device)[::2]
+    ref_v = utils.to_reference(v, True)
+    ref_g = utils.to_reference(g, True)
+    ref_out0 = torch.empty((8, 4), dtype=ref_v.dtype, device=ref_v.device).T
+    ref_out1 = torch.empty(8, dtype=ref_v.dtype, device=ref_v.device)[::2]
+    out0 = torch.empty((8, 4), device=v.device).T
+    out1 = torch.empty(8, device=v.device)[::2]
+
+    ref = torch.ops.aten._weight_norm_interface.out(
+        ref_v, ref_g, 0, out0=ref_out0, out1=ref_out1
+    )
+    with flag_gems.use_gems():
+        res = torch.ops.aten._weight_norm_interface.out(v, g, 0, out0=out0, out1=out1)
+
+    assert res[0] is out0 and res[1] is out1
+    utils.gems_assert_close(res[0], ref[0], torch.float32)
+    utils.gems_assert_close(res[1], ref[1], torch.float32)
 
 
 @pytest.mark.weight_norm_interface_backward
